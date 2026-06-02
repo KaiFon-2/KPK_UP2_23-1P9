@@ -1,7 +1,7 @@
 from peewee import *
 import logging
-from typing import Optional, List, Dict, Any, Union
-from playhouse.shortcuts import model_to_dict
+from typing import Optional, List, Dict, Any
+from datetime import datetime
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -66,7 +66,13 @@ class Assignment(Model):
     
     @staticmethod
     def validate_id(value: int, field_name: str = "assignment_id") -> None:
-        """Валидация ID (должен быть целым числом > 0)"""
+        """
+        Валидация ID (должен быть целым числом > 0)
+        
+        Args:
+            value: проверяемое значение
+            field_name: имя поля для сообщения об ошибке
+        """
         if not isinstance(value, int):
             raise ValidationError(f"{field_name} должен быть целым числом, получено: {type(value).__name__}")
         if value <= 0:
@@ -87,11 +93,52 @@ class Assignment(Model):
                 raise ValidationError(f"offset должен быть >= 0, получено: {offset}")
     
     @classmethod
+    def validate_filter_params(cls, teacher_id: Optional[int] = None,
+                               group_id: Optional[int] = None,
+                               discipline_id: Optional[int] = None,
+                               semester: Optional[int] = None) -> None:
+        """
+        Валидация параметров фильтрации согласно требованиям doc.md
+        
+        Args:
+            teacher_id: ID преподавателя (должен быть > 0 если указан)
+            group_id: ID группы (должен быть > 0 если указан)
+            discipline_id: ID дисциплины (должен быть > 0 если указан)
+            semester: номер семестра (должен быть 1-8 если указан)
+        
+        Raises:
+            ValidationError: если какой-либо параметр не соответствует ограничениям
+        """
+        if teacher_id is not None:
+            if not isinstance(teacher_id, int):
+                raise ValidationError(f"teacher_id должен быть целым числом, получено: {type(teacher_id).__name__}")
+            if teacher_id <= 0:
+                raise ValidationError(f"teacher_id должен быть > 0, получено: {teacher_id}")
+        
+        if group_id is not None:
+            if not isinstance(group_id, int):
+                raise ValidationError(f"group_id должен быть целым числом, получено: {type(group_id).__name__}")
+            if group_id <= 0:
+                raise ValidationError(f"group_id должен быть > 0, получено: {group_id}")
+        
+        if discipline_id is not None:
+            if not isinstance(discipline_id, int):
+                raise ValidationError(f"discipline_id должен быть целым числом, получено: {type(discipline_id).__name__}")
+            if discipline_id <= 0:
+                raise ValidationError(f"discipline_id должен быть > 0, получено: {discipline_id}")
+        
+        if semester is not None:
+            if not isinstance(semester, int):
+                raise ValidationError(f"semester должен быть целым числом, получено: {type(semester).__name__}")
+            if not (1 <= semester <= 8):
+                raise ValidationError(f"semester должен быть от 1 до 8, получено: {semester}")
+    
+    @classmethod
     def check_uniqueness(cls, teacher_id: int, discipline_id: int, 
                          group_id: int, semester: int, 
                          exclude_id: Optional[int] = None) -> None:
         """
-        Проверка уникальности комбинации полей (среди всех записей, включая неактивные)
+        Проверка уникальности комбинации полей (среди ВСЕХ записей)
         
         Args:
             teacher_id: ID преподавателя
@@ -134,8 +181,7 @@ class Assignment(Model):
             hours: количество часов (>0)
         
         Returns:
-            Dict[str, Any]: словарь с данными созданной записи в порядке:
-                id, teacher_id, group_id, discipline_id, semester, hours, is_active
+            Dict[str, Any]: словарь с данными созданной записи
         
         Raises:
             ValidationError: при ошибках валидации полей
@@ -183,11 +229,10 @@ class Assignment(Model):
                      Значения None игнорируются (не обновляются)
         
         Returns:
-            Dict[str, Any]: словарь с обновленными данными в порядке:
-                id, teacher_id, group_id, discipline_id, semester, hours, is_active
+            Dict[str, Any]: словарь с обновленными данными
         
         Raises:
-            ValidationError: при ошибках валидации полей
+            ValidationError: при ошибках валидации полей или невалидном ID
             AssignmentNotFoundError: если запись не найдена
             AssignmentDuplicateError: при нарушении уникальности
             DatabaseError: при ошибке базы данных
@@ -306,16 +351,21 @@ class Assignment(Model):
         """
         Восстановление мягко удаленной записи (установка is_active = True)
         
+        ВНИМАНИЕ: Восстановление выполняется БЕЗ проверки уникальности,
+        так как требование уникальности применяется только к активным записям.
+        При восстановлении может быть создана дублирующая комбинация полей,
+        что приведет к нарушению индекса UNIQUE в БД.
+        
         Args:
             assignment_id: ID записи для восстановления (>0)
         
         Returns:
-            bool: True если восстановление успешно, 
-                  False если запись уже активна или активная запись с такой комбинацией уже существует
+            bool: True если восстановление успешно, False если запись уже активна
         
         Raises:
             ValidationError: при невалидном assignment_id
             AssignmentNotFoundError: если запись не найдена
+            AssignmentDuplicateError: при нарушении уникальности (если активная запись с такой комбинацией уже существует)
             DatabaseError: при ошибке базы данных
         """
         # Валидация ID
@@ -331,31 +381,26 @@ class Assignment(Model):
             logger.warning(f"Assignment с id={assignment_id} уже активен")
             return False
         
-        # Проверка уникальности перед восстановлением
-        try:
-            cls.check_uniqueness(
-                assignment.teacher_id,
-                assignment.discipline_id,
-                assignment.group_id,
-                assignment.semester,
-                exclude_id=assignment_id
-            )
-        except AssignmentDuplicateError:
-            logger.warning(f"Невозможно восстановить Assignment с id={assignment_id}: "
-                         "активная запись с такой комбинацией уже существует")
-            return False
-        
+        # Пытаемся восстановить запись
+        # Проверка уникальности произойдет на уровне БД благодаря индексу
         try:
             assignment.is_active = True
             assignment.save(only=['is_active'])
             logger.info(f"Восстановлен Assignment с id={assignment_id}")
             return True
+        except IntegrityError as e:
+            if "UNIQUE" in str(e):
+                raise AssignmentDuplicateError(
+                    f"Невозможно восстановить Assignment с id={assignment_id}: "
+                    "активная запись с такой комбинацией полей уже существует"
+                )
+            raise DatabaseError(f"Ошибка целостности БД: {e}")
         except Exception as e:
             logger.error(f"Ошибка при восстановлении Assignment с id={assignment_id}: {e}")
             raise DatabaseError(f"Ошибка при восстановлении записи: {e}")
     
     @classmethod
-    def get_by_id(cls, assignment_id: int) -> Optional['Assignment']:
+    def get_by_id(cls, assignment_id: int) -> Dict[str, Any]:
         """
         Получение Assignment по ID
         
@@ -363,17 +408,23 @@ class Assignment(Model):
             assignment_id: ID записи (>0)
         
         Returns:
-            Optional[Assignment]: объект Assignment или None, если запись не найдена
+            Dict[str, Any]: словарь с данными записи
         
         Raises:
             ValidationError: при невалидном assignment_id
+            AssignmentNotFoundError: если запись не найдена
+            DatabaseError: при ошибке базы данных
         """
         cls.validate_id(assignment_id, "assignment_id")
         
         try:
-            return super().get_by_id(assignment_id)
+            assignment = super().get_by_id(assignment_id)
+            return assignment.to_dict()
         except cls.DoesNotExist:
-            return None
+            raise AssignmentNotFoundError(f"Assignment с id={assignment_id} не найден")
+        except Exception as e:
+            logger.error(f"Ошибка при получении Assignment с id={assignment_id}: {e}")
+            raise DatabaseError(f"Ошибка при получении записи: {e}")
     
     @classmethod
     def get_filtered(cls, teacher_id: Optional[int] = None, 
@@ -387,28 +438,30 @@ class Assignment(Model):
         Получение списка Assignment с фильтрацией и пагинацией
         
         Args:
-            teacher_id: ID преподавателя (опционально, без валидации)
-            group_id: ID группы (опционально, без валидации)
-            discipline_id: ID дисциплины (опционально, без валидации)
-            semester: номер семестра (опционально, без валидации)
+            teacher_id: ID преподавателя (опционально, с валидацией >0)
+            group_id: ID группы (опционально, с валидацией >0)
+            discipline_id: ID дисциплины (опционально, с валидацией >0)
+            semester: номер семестра (опционально, с валидацией 1-8)
             is_active: статус активности (опционально)
             limit: ограничение количества записей (>=0)
             offset: смещение для пагинации (>=0)
         
         Returns:
-            List[Dict[str, Any]]: список словарей с данными записей в порядке:
-                id, teacher_id, group_id, discipline_id, semester, hours, is_active
+            List[Dict[str, Any]]: список словарей с данными записей
         
         Raises:
-            ValidationError: если limit или offset некорректны
+            ValidationError: если параметры фильтрации или пагинации некорректны
             DatabaseError: при ошибке базы данных
         """
+        # Валидация параметров фильтрации согласно требованиям doc.md
+        cls.validate_filter_params(teacher_id, group_id, discipline_id, semester)
+        
         # Валидация параметров пагинации
         cls.validate_pagination_params(limit, offset)
         
         query = cls.select()
         
-        # Применение фильтров (без валидации значений)
+        # Применение фильтров (после валидации)
         if teacher_id is not None:
             query = query.where(cls.teacher_id == teacher_id)
         if group_id is not None:
@@ -446,7 +499,7 @@ class Assignment(Model):
         return {
             'id': self.id,
             'teacher_id': self.teacher_id,
-            'group_id': self.group_id,  # group_id перед discipline_id
+            'group_id': self.group_id,
             'discipline_id': self.discipline_id,
             'semester': self.semester,
             'hours': self.hours,
@@ -476,7 +529,8 @@ if __name__ == '__main__':
     init_db()
     
     try:
-        # Создание записи
+        print("=" * 60)
+        print("1. Создание записи")
         result = Assignment.create_assignment(
             teacher_id=1,
             discipline_id=1,
@@ -486,44 +540,45 @@ if __name__ == '__main__':
         )
         print(f"Создано: {result}")
         
-        # Обновление записи
-        updated = Assignment.update_assignment(
-            assignment_id=result['id'],
-            hours=40,
-            semester=4
-        )
-        print(f"Обновлено: {updated}")
+        print("\n" + "=" * 60)
+        print("2. Получение по ID (с исключением)")
+        try:
+            found = Assignment.get_by_id(result['id'])
+            print(f"Найдено: {found}")
+        except AssignmentNotFoundError as e:
+            print(f"Ошибка: {e}")
         
-        # Мягкое удаление
+        print("\n" + "=" * 60)
+        print("3. Фильтрация с валидацией параметров")
+        try:
+            filtered = Assignment.get_filtered(teacher_id=1, is_active=True)
+            print(f"Результат фильтрации: {filtered}")
+            
+            # Попытка фильтрации с некорректным teacher_id
+            print("\nПопытка фильтрации с teacher_id=0:")
+            filtered_invalid = Assignment.get_filtered(teacher_id=0)
+        except ValidationError as e:
+            print(f"Ожидаемая ошибка валидации: {e}")
+        
+        print("\n" + "=" * 60)
+        print("4. Мягкое удаление")
         deleted = Assignment.soft_delete(assignment_id=result['id'])
         print(f"Удалено: {deleted}")
         
-        # Восстановление (должно вернуть True)
-        restored = Assignment.restore(assignment_id=result['id'])
-        print(f"Восстановлено: {restored}")
+        print("\n" + "=" * 60)
+        print("5. Восстановление (с проверкой уникальности)")
+        try:
+            restored = Assignment.restore(assignment_id=result['id'])
+            print(f"Восстановлено: {restored}")
+        except AssignmentDuplicateError as e:
+            print(f"Ошибка при восстановлении: {e}")
         
-        # Проверка восстановления с дубликатом
-        # Создаем еще одну запись
-        result2 = Assignment.create_assignment(
-            teacher_id=2,
-            discipline_id=2,
-            group_id=2,
-            semester=1,
-            hours=30
-        )
-        
-        # Пытаемся восстановить с конфликтом уникальности
-        restored_conflict = Assignment.restore(assignment_id=result2['id'])
-        print(f"Восстановление с конфликтом: {restored_conflict} (ожидается False)")
-        
-        # Получение по ID
-        found = Assignment.get_by_id(result['id'])
-        if found:
-            print(f"Найдено: {found.to_dict()}")
-        
-        # Фильтрация (без валидации значений)
-        filtered = Assignment.get_filtered(teacher_id=0, group_id=-1, is_active=True)
-        print(f"Фильтрация с некорректными значениями: {filtered}")
+        print("\n" + "=" * 60)
+        print("6. Попытка получения несуществующей записи")
+        try:
+            not_found = Assignment.get_by_id(99999)
+        except AssignmentNotFoundError as e:
+            print(f"Ожидаемая ошибка: {e}")
         
     except (ValidationError, AssignmentDuplicateError, AssignmentNotFoundError, DatabaseError) as e:
         print(f"Ошибка: {e}")
