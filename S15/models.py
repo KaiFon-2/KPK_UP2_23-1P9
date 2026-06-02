@@ -120,7 +120,8 @@ class Assignment(Model):
     def validate_filter_params(cls, teacher_id: Optional[int] = None,
                                group_id: Optional[int] = None,
                                discipline_id: Optional[int] = None,
-                               semester: Optional[int] = None) -> None:
+                               semester: Optional[int] = None,
+                               is_active: Optional[bool] = None) -> None:
         """
         Валидация параметров фильтрации согласно требованиям doc.md
         
@@ -131,6 +132,7 @@ class Assignment(Model):
             group_id: ID группы (должен быть > 0 если указан)
             discipline_id: ID дисциплины (должен быть > 0 если указан)
             semester: номер семестра (должен быть 1-8 если указан)
+            is_active: статус активности (должен быть булевым если указан)
         
         Raises:
             ValidationError: если какой-либо параметр не соответствует ограничениям
@@ -143,6 +145,8 @@ class Assignment(Model):
             cls.validate_positive(discipline_id, "discipline_id")
         if semester is not None:
             cls.validate_semester(semester)
+        if is_active is not None and not isinstance(is_active, bool):
+            raise ValidationError(f"is_active должен быть булевым значением, получено: {type(is_active).__name__}")
     
     @classmethod
     def check_uniqueness(cls, teacher_id: int, discipline_id: int, 
@@ -222,7 +226,6 @@ class Assignment(Model):
             logger.info(f"Создан Assignment с id={assignment.id}")
             return assignment.to_dict()
         except IntegrityError as e:
-            # Универсальная обработка ошибок уникальности
             error_msg = str(e).lower()
             if "unique" in error_msg or "duplicate" in error_msg:
                 raise AssignmentDuplicateError("Нарушение уникальности комбинации полей")
@@ -261,57 +264,78 @@ class Assignment(Model):
         # Валидация ID
         cls.validate_id(assignment_id, "assignment_id")
         
-        # Получение существующей записи
+        # 1. Сначала валидируем все переданные значения
+        validation_errors = []
+        for key, value in kwargs.items():
+            if value is not None:
+                try:
+                    if key == 'teacher_id':
+                        cls.validate_positive(value, "teacher_id")
+                    elif key == 'discipline_id':
+                        cls.validate_positive(value, "discipline_id")
+                    elif key == 'group_id':
+                        cls.validate_positive(value, "group_id")
+                    elif key == 'semester':
+                        cls.validate_semester(value)
+                    elif key == 'hours':
+                        cls.validate_positive(value, "hours")
+                except ValidationError as e:
+                    validation_errors.append(str(e))
+        
+        if validation_errors:
+            raise ValidationError("; ".join(validation_errors))
+        
+        # 2. Получение существующей записи
         try:
             assignment = cls.get(cls.id == assignment_id)
         except cls.DoesNotExist:
             raise AssignmentNotFoundError(f"Assignment с id={assignment_id} не найден")
         
-        # Фильтруем только ключевые поля для проверки уникальности
-        key_fields = ['teacher_id', 'discipline_id', 'group_id', 'semester']
+        # Сохраняем старые значения ключевых полей для проверки уникальности
+        old_key_values = {
+            'teacher_id': assignment.teacher_id,
+            'discipline_id': assignment.discipline_id,
+            'group_id': assignment.group_id,
+            'semester': assignment.semester
+        }
         
-        # Применяем изменения к объекту (игнорируем None значения)
+        # 3. Применяем изменения к объекту
         updated_fields = []
-        changed_key_fields = []
+        key_fields_changed = []
         
         for key, value in kwargs.items():
             if hasattr(assignment, key) and value is not None:
-                # Проверяем, действительно ли изменилось значение
                 if getattr(assignment, key) != value:
                     setattr(assignment, key, value)
                     updated_fields.append(key)
-                    if key in key_fields:
-                        changed_key_fields.append(key)
+                    if key in ['teacher_id', 'discipline_id', 'group_id', 'semester']:
+                        key_fields_changed.append(key)
         
         if not updated_fields:
             logger.info(f"Нет изменений для Assignment с id={assignment_id}")
             return assignment.to_dict()
         
-        # Валидация обновленных полей (только измененных)
-        if 'teacher_id' in updated_fields:
-            cls.validate_positive(assignment.teacher_id, "teacher_id")
-        if 'discipline_id' in updated_fields:
-            cls.validate_positive(assignment.discipline_id, "discipline_id")
-        if 'group_id' in updated_fields:
-            cls.validate_positive(assignment.group_id, "group_id")
-        if 'semester' in updated_fields:
-            cls.validate_semester(assignment.semester)
-        if 'hours' in updated_fields:
-            cls.validate_positive(assignment.hours, "hours")
-        
-        # Проверка уникальности, если изменились любые ключевые поля
+        # 4. Проверка уникальности, если изменились ключевые поля
         # Примечание: проверка выполняется только при изменении ключевых полей,
-        # так как только они влияют на уникальность комбинации
-        if changed_key_fields:
-            cls.check_uniqueness(
-                assignment.teacher_id,
-                assignment.discipline_id,
-                assignment.group_id,
-                assignment.semester,
-                exclude_id=assignment_id
+        # так как только они влияют на уникальность комбинации (teacher_id, 
+        # discipline_id, group_id, semester)
+        if key_fields_changed:
+            # Проверяем, действительно ли изменились значения
+            actually_changed = any(
+                getattr(assignment, field) != old_key_values[field]
+                for field in key_fields_changed
             )
+            if actually_changed:
+                cls.check_uniqueness(
+                    assignment.teacher_id,
+                    assignment.discipline_id,
+                    assignment.group_id,
+                    assignment.semester,
+                    exclude_id=assignment_id
+                )
         
-        # Сохранение изменений
+        # 5. Сохранение изменений (только измененных полей)
+        # Безопасно, так как поле is_active защищено отдельной проверкой
         try:
             assignment.save(only=updated_fields)
             logger.info(f"Обновлен Assignment с id={assignment_id}, поля: {updated_fields}")
@@ -338,8 +362,9 @@ class Assignment(Model):
         Returns:
             bool: True если удаление успешно, False в противном случае
         
-        Raises:
-            DatabaseError: при критической ошибке базы данных (логируется, но не возвращается)
+        Примечание: Ожидаемые ошибки (невалидный ID, запись не найдена, уже удалена)
+        логируются и возвращают False. Критические ошибки БД также возвращают False,
+        но логируются с более высоким уровнем.
         """
         # Валидация ID
         try:
@@ -365,8 +390,9 @@ class Assignment(Model):
             logger.info(f"Удален Assignment с id={assignment_id}")
             return True
         except Exception as e:
-            logger.error(f"Ошибка при удалении Assignment с id={assignment_id}: {e}")
-            # Не выбрасываем исключение, так как по спецификации метод должен возвращать bool
+            # Критическая ошибка БД - логируем и возвращаем False
+            logger.error(f"Критическая ошибка при удалении Assignment с id={assignment_id}: {e}", 
+                        exc_info=True)
             return False
     
     @classmethod
@@ -383,8 +409,9 @@ class Assignment(Model):
         Returns:
             bool: True если восстановление успешно, False в противном случае
         
-        Raises:
-            DatabaseError: при критической ошибке базы данных (логируется, но не возвращается)
+        Примечание: Ожидаемые ошибки (невалидный ID, запись не найдена, уже активна)
+        логируются и возвращают False. Критические ошибки БД также возвращают False,
+        но логируются с более высоким уровнем.
         """
         # Валидация ID
         try:
@@ -410,8 +437,9 @@ class Assignment(Model):
             logger.info(f"Восстановлен Assignment с id={assignment_id}")
             return True
         except Exception as e:
-            logger.error(f"Ошибка при восстановлении Assignment с id={assignment_id}: {e}")
-            # Не выбрасываем исключение, так как метод должен возвращать bool
+            # Критическая ошибка БД - логируем и возвращаем False
+            logger.error(f"Критическая ошибка при восстановлении Assignment с id={assignment_id}: {e}", 
+                        exc_info=True)
             return False
     
     @classmethod
@@ -450,7 +478,7 @@ class Assignment(Model):
                      limit: Optional[int] = None, 
                      offset: Optional[int] = None) -> List[Dict[str, Any]]:
         """
-        Получение списка Assignment с фильтрацией и пагинациией
+        Получение списка Assignment с фильтрацией и пагинацией
         
         Args:
             teacher_id: ID преподавателя (опционально, с валидацией >0, None = не фильтровать)
@@ -468,8 +496,8 @@ class Assignment(Model):
             ValidationError: если параметры фильтрации или пагинации некорректны
             DatabaseError: при ошибке базы данных
         """
-        # Валидация параметров фильтрации (None игнорируется)
-        cls.validate_filter_params(teacher_id, group_id, discipline_id, semester)
+        # Валидация параметров фильтрации (включая is_active)
+        cls.validate_filter_params(teacher_id, group_id, discipline_id, semester, is_active)
         
         # Валидация параметров пагинации
         cls.validate_pagination_params(limit, offset)
@@ -593,20 +621,21 @@ if __name__ == '__main__':
         print(f"Результат фильтрации: {filtered}")
         
         print("\n" + "=" * 60)
-        print("8. Проверка обработки ошибок в delete")
-        # Попытка удаления с невалидным ID
-        invalid_deleted = Assignment.delete(assignment_id=0)
-        print(f"Удаление с ID=0: {invalid_deleted} (ожидается False)")
+        print("8. Проверка валидации is_active в фильтрации")
+        try:
+            invalid_filter = Assignment.get_filtered(is_active="true")
+        except ValidationError as e:
+            print(f"Ожидаемая ошибка валидации is_active: {e}")
         
         print("\n" + "=" * 60)
-        print("9. Попытка обновления is_active через update_assignment")
+        print("9. Проверка предварительной валидации в update_assignment")
         try:
-            invalid = Assignment.update_assignment(
+            invalid_update = Assignment.update_assignment(
                 assignment_id=result['id'],
-                is_active=False
+                teacher_id=-1
             )
         except ValidationError as e:
-            print(f"Ожидаемая ошибка: {e}")
+            print(f"Ожидаемая ошибка валидации: {e}")
         
     except (ValidationError, AssignmentDuplicateError, AssignmentNotFoundError, DatabaseError) as e:
         print(f"Ошибка: {e}")
