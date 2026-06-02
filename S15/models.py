@@ -4,7 +4,8 @@
 """
 
 import os
-from typing import List, Optional, Dict, Any
+import sys
+from typing import List, Optional, Dict, Any, Tuple
 from peewee import (
     SqliteDatabase,
     Model,
@@ -94,6 +95,31 @@ class Assignment(BaseModel):
         if "hours" in fields:
             self._validate_positive(fields["hours"], "hours")
 
+    def _check_uniqueness_excluding_self(
+        self, 
+        teacher_id: int, 
+        discipline_id: int, 
+        group_id: int, 
+        semester: int
+    ) -> bool:
+        """
+        Проверяет, существует ли уже запись с такой комбинацией полей,
+        исключая текущую запись (при обновлении).
+        Возвращает True, если запись существует, иначе False.
+        """
+        query = Assignment.select().where(
+            Assignment.teacher_id == teacher_id,
+            Assignment.discipline_id == discipline_id,
+            Assignment.group_id == group_id,
+            Assignment.semester == semester
+        )
+        
+        # Исключаем текущую запись при обновлении
+        if self.id is not None:
+            query = query.where(Assignment.id != self.id)
+        
+        return query.exists()
+
     # ==================== CRUD ОПЕРАЦИИ ====================
 
     @classmethod
@@ -107,6 +133,18 @@ class Assignment(BaseModel):
             temp = cls(**kwargs)
             temp.validate_full()
             
+            # Проверка уникальности перед созданием
+            exists = cls.select().where(
+                cls.teacher_id == kwargs.get("teacher_id"),
+                cls.discipline_id == kwargs.get("discipline_id"),
+                cls.group_id == kwargs.get("group_id"),
+                cls.semester == kwargs.get("semester")
+            ).exists()
+            
+            if exists:
+                print(f"Ошибка уникальности: запись с такой комбинацией уже существует")
+                return None
+            
             # Создаём запись в БД
             instance = cls.create(**kwargs)
             return instance
@@ -114,7 +152,7 @@ class Assignment(BaseModel):
             print(f"Ошибка валидации: {e}")
             return None
         except IntegrityError as e:
-            print(f"Ошибка уникальности: запись с такой комбинацией уже существует - {e}")
+            print(f"Ошибка уникальности: {e}")
             return None
         except Exception as e:
             print(f"Неизвестная ошибка при создании: {e}")
@@ -127,12 +165,42 @@ class Assignment(BaseModel):
         Возвращает обновлённый объект или None при ошибке.
         """
         try:
+            # Сохраняем старые значения для проверки уникальности
+            old_teacher_id = self.teacher_id
+            old_discipline_id = self.discipline_id
+            old_group_id = self.group_id
+            old_semester = self.semester
+            
             # Валидируем только переданные поля
             self.validate_partial(kwargs)
             
+            # Определяем новые значения (старые, если не переданы)
+            new_teacher_id = kwargs.get("teacher_id", old_teacher_id)
+            new_discipline_id = kwargs.get("discipline_id", old_discipline_id)
+            new_group_id = kwargs.get("group_id", old_group_id)
+            new_semester = kwargs.get("semester", old_semester)
+            
+            # Проверяем уникальность новой комбинации
+            query = Assignment.select().where(
+                Assignment.teacher_id == new_teacher_id,
+                Assignment.discipline_id == new_discipline_id,
+                Assignment.group_id == new_group_id,
+                Assignment.semester == new_semester
+            )
+            
+            # Исключаем текущую запись из проверки
+            if self.id is not None:
+                query = query.where(Assignment.id != self.id)
+            
+            if query.exists():
+                print(f"Ошибка уникальности: комбинация (teacher_id={new_teacher_id}, "
+                      f"discipline_id={new_discipline_id}, group_id={new_group_id}, "
+                      f"semester={new_semester}) уже существует")
+                return None
+            
             # Выполняем обновление
-            query = Assignment.update(**kwargs).where(Assignment.id == self.id)
-            query.execute()
+            update_query = Assignment.update(**kwargs).where(Assignment.id == self.id)
+            update_query.execute()
             
             # Обновляем текущий экземпляр
             for key, value in kwargs.items():
@@ -143,7 +211,7 @@ class Assignment(BaseModel):
             print(f"Ошибка валидации: {e}")
             return None
         except IntegrityError as e:
-            print(f"Ошибка уникальности: нарушение уникального индекса - {e}")
+            print(f"Ошибка уникальности: {e}")
             return None
         except Exception as e:
             print(f"Неизвестная ошибка при обновлении: {e}")
@@ -175,12 +243,10 @@ class Assignment(BaseModel):
         Возвращает объект или None, если запись не найдена.
         """
         try:
-            return cls.get_by_id(assignment_id)
-        except DoesNotExist:
-            print(f"Запись с id={assignment_id} не найдена")
-            return None
+            # Используем get_or_none для безопасного получения
+            return cls.get_or_none(cls.id == assignment_id)
         except Exception as e:
-            print(f"Ошибка при получении записи: {e}")
+            print(f"Ошибка при получении записи по ID {assignment_id}: {e}")
             return None
 
     @classmethod
@@ -198,11 +264,11 @@ class Assignment(BaseModel):
         Получение списка Assignment с фильтрацией и пагинацией.
         
         Параметры:
-        - teacher_id: фильтр по ID преподавателя
-        - group_id: фильтр по ID группы
-        - discipline_id: фильтр по ID дисциплины
-        - semester: фильтр по семестру
-        - is_active: фильтр по активности
+        - teacher_id: фильтр по ID преподавателя (None = без фильтра)
+        - group_id: фильтр по ID группы (None = без фильтра)
+        - discipline_id: фильтр по ID дисциплины (None = без фильтра)
+        - semester: фильтр по семестру (None = без фильтра)
+        - is_active: фильтр по активности (None = без фильтра)
         - limit: максимальное количество записей
         - offset: количество пропускаемых записей
         
@@ -211,7 +277,7 @@ class Assignment(BaseModel):
         try:
             query = cls.select()
             
-            # Применяем фильтры
+            # Применяем фильтры (явная проверка на None)
             if teacher_id is not None:
                 query = query.where(cls.teacher_id == teacher_id)
             if group_id is not None:
@@ -287,19 +353,10 @@ def init_db() -> bool:
     try:
         database.connect(reuse_if_open=True)
         
-        # Проверяем, существует ли уже таблица
-        tables_before = database.get_tables()
+        # safe=True предотвращает ошибку, если таблица уже существует
+        database.create_tables([Assignment], safe=True)
         
-        # Создаём таблицу (без safe=True для явной обработки ошибок)
-        database.create_tables([Assignment])
-        
-        tables_after = database.get_tables()
-        
-        if "assignments" in tables_after:
-            print("Таблица assignments успешно создана или уже существует")
-        else:
-            print("Предупреждение: таблица assignments не была создана")
-            
+        print("Таблица assignments успешно создана или уже существует")
         database.close()
         return True
         
@@ -308,46 +365,82 @@ def init_db() -> bool:
         return False
 
 
-# Точка входа для автономной инициализации
+# ==================== ДЕМОНСТРАЦИОННЫЙ КОД ====================
+
+def _run_demo() -> None:
+    """Демонстрация работы методов (только при первом запуске с флагом --demo)"""
+    import random
+    
+    print("\n--- Демонстрация работы ---")
+    
+    # Генерируем уникальные ID для демонстрации, чтобы избежать конфликтов
+    demo_teacher_id = random.randint(1000, 9999)
+    demo_group_id = random.randint(1000, 9999)
+    demo_discipline_id = random.randint(1000, 9999)
+    demo_semester = random.randint(1, 8)
+    
+    print(f"Используемые ID: teacher={demo_teacher_id}, group={demo_group_id}, "
+          f"discipline={demo_discipline_id}, semester={demo_semester}")
+    
+    # Создание
+    assignment = Assignment.create_assignment(
+        teacher_id=demo_teacher_id,
+        group_id=demo_group_id,
+        discipline_id=demo_discipline_id,
+        semester=demo_semester,
+        hours=72
+    )
+    if assignment:
+        print(f"Создано: {assignment.to_dict()}")
+    
+    # Получение по ID
+    if assignment:
+        found = Assignment.get_by_id(assignment.id)
+        if found:
+            print(f"Найдено по ID {assignment.id}: {found.to_dict()}")
+    
+    # Обновление
+    if assignment:
+        updated = assignment.update_assignment(hours=80)
+        if updated:
+            print(f"Обновлено: {updated.to_dict()}")
+    
+    # Мягкое удаление
+    if assignment:
+        result = assignment.soft_delete()
+        print(f"Мягкое удаление: {result}")
+    
+    # Список с фильтрацией
+    active_list = Assignment.get_list(is_active=True)
+    print(f"Активных записей: {len(active_list)}")
+    
+    # Создание дубликата (должно провалиться)
+    print("\n--- Проверка уникальности ---")
+    duplicate = Assignment.create_assignment(
+        teacher_id=demo_teacher_id,
+        group_id=demo_group_id,
+        discipline_id=demo_discipline_id,
+        semester=demo_semester,
+        hours=100
+    )
+    if duplicate is None:
+        print("Дубликат не создан (успешно, уникальность соблюдена)")
+
+
+# Точка входа
 if __name__ == "__main__":
+    # Инициализация БД
     success = init_db()
+    
     if success:
-        print("База данных успешно инициализирована")
+        print(f"База данных успешно инициализирована")
         print(f"Путь к БД: {DB_PATH}")
         
-        # Демонстрация работы методов
-        print("\n--- Демонстрация работы ---")
-        
-        # Создание
-        assignment = Assignment.create_assignment(
-            teacher_id=1,
-            group_id=1,
-            discipline_id=1,
-            semester=1,
-            hours=72
-        )
-        if assignment:
-            print(f"Создано: {assignment.to_dict()}")
-        
-        # Получение по ID
-        found = Assignment.get_by_id(1)
-        if found:
-            print(f"Найдено по ID 1: {found.to_dict()}")
-        
-        # Обновление
-        if assignment:
-            updated = assignment.update_assignment(hours=80)
-            if updated:
-                print(f"Обновлено: {updated.to_dict()}")
-        
-        # Мягкое удаление
-        if assignment:
-            result = assignment.soft_delete()
-            print(f"Мягкое удаление: {result}")
-        
-        # Список с фильтрацией
-        active_list = Assignment.get_list(is_active=True)
-        print(f"Активных записей: {len(active_list)}")
-        
+        # Демонстрация запускается только с явным флагом --demo
+        if "--demo" in sys.argv:
+            _run_demo()
+        else:
+            print("\nДля запуска демонстрации используйте: python models.py --demo")
     else:
         print("ОШИБКА: не удалось инициализировать базу данных")
+        sys.exit(1)
