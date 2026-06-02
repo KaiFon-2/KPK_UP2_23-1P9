@@ -321,21 +321,24 @@ class Assignment(Model):
             assignment_id: ID записи для удаления (>0)
         
         Returns:
-            bool: True если удаление успешно, False если запись уже удалена
+            bool: True если удаление успешно, False если запись уже удалена или не найдена
         
         Raises:
             ValidationError: при невалидном assignment_id
-            AssignmentNotFoundError: если запись не найдена
             DatabaseError: при ошибке базы данных
         """
         # Валидация ID
-        cls.validate_id(assignment_id, "assignment_id")
+        try:
+            cls.validate_id(assignment_id, "assignment_id")
+        except ValidationError:
+            return False
         
         # Получение существующей записи
         try:
             assignment = cls.get_by_id(assignment_id)
         except cls.DoesNotExist:
-            raise AssignmentNotFoundError(f"Assignment с id={assignment_id} не найден")
+            logger.warning(f"Assignment с id={assignment_id} не найден")
+            return False
         
         if not assignment.is_active:
             logger.warning(f"Assignment с id={assignment_id} уже удален")
@@ -362,21 +365,24 @@ class Assignment(Model):
             assignment_id: ID записи для восстановления (>0)
         
         Returns:
-            bool: True если восстановление успешно, False если запись уже активна
+            bool: True если восстановление успешно, False если запись уже активна или не найдена
         
         Raises:
             ValidationError: при невалидном assignment_id
-            AssignmentNotFoundError: если запись не найдена
             DatabaseError: при ошибке базы данных
         """
         # Валидация ID
-        cls.validate_id(assignment_id, "assignment_id")
+        try:
+            cls.validate_id(assignment_id, "assignment_id")
+        except ValidationError:
+            return False
         
         # Получение существующей записи
         try:
             assignment = cls.get_by_id(assignment_id)
         except cls.DoesNotExist:
-            raise AssignmentNotFoundError(f"Assignment с id={assignment_id} не найден")
+            logger.warning(f"Assignment с id={assignment_id} не найден")
+            return False
         
         if assignment.is_active:
             logger.warning(f"Assignment с id={assignment_id} уже активен")
@@ -428,8 +434,7 @@ class Assignment(Model):
                      semester: Optional[int] = None, 
                      is_active: Optional[bool] = None,
                      limit: Optional[int] = None, 
-                     offset: Optional[int] = None,
-                     order_by: Optional[str] = None) -> List[Dict[str, Any]]:
+                     offset: Optional[int] = None) -> List[Dict[str, Any]]:
         """
         Получение списка Assignment с фильтрацией и пагинацией
         
@@ -441,10 +446,9 @@ class Assignment(Model):
             is_active: статус активности (опционально, булевый тип, None = не фильтровать)
             limit: ограничение количества записей (>=0)
             offset: смещение для пагинации (>=0)
-            order_by: поле для сортировки (опционально, например 'id', 'teacher_id', 'semester')
         
         Returns:
-            List[Dict[str, Any]]: список словарей с данными записей
+            List[Dict[str, Any]]: список словарей с данными записей (сортировка по id)
         
         Raises:
             ValidationError: если параметры фильтрации или пагинации некорректны
@@ -459,11 +463,6 @@ class Assignment(Model):
         
         # Валидация параметров пагинации
         cls.validate_pagination_params(limit, offset)
-        
-        # Валидация параметра сортировки
-        valid_sort_fields = ['id', 'teacher_id', 'group_id', 'discipline_id', 'semester', 'hours', 'is_active']
-        if order_by is not None and order_by not in valid_sort_fields:
-            raise ValidationError(f"order_by должен быть одним из: {', '.join(valid_sort_fields)}")
         
         query = cls.select()
         
@@ -485,11 +484,8 @@ class Assignment(Model):
         if offset is not None:
             query = query.offset(offset)
         
-        # Сортировка (по умолчанию по id, если не указана)
-        if order_by is not None:
-            query = query.order_by(getattr(cls, order_by))
-        else:
-            query = query.order_by(cls.id)
+        # Сортировка по id (как указано в doc.md)
+        query = query.order_by(cls.id)
         
         try:
             return [assignment.to_dict() for assignment in query]
@@ -520,7 +516,8 @@ def init_db():
     """Инициализация базы данных"""
     try:
         db.connect()
-        db.create_tables([Assignment])
+        # Используем safe=True для безопасного создания таблиц
+        db.create_tables([Assignment], safe=True)
         logger.info("База данных успешно инициализирована")
     except Exception as e:
         logger.error(f"Ошибка при инициализации БД: {e}")
@@ -569,21 +566,22 @@ if __name__ == '__main__':
         print(f"Удалено: {deleted}")
         
         print("\n" + "=" * 60)
-        print("5. Восстановление (без проверки уникальности)")
+        print("5. Попытка удаления несуществующей записи")
+        deleted_not_found = Assignment.soft_delete(assignment_id=99999)
+        print(f"Результат удаления несуществующей записи: {deleted_not_found} (ожидается False)")
+        
+        print("\n" + "=" * 60)
+        print("6. Восстановление записи")
         restored = Assignment.restore(assignment_id=result['id'])
         print(f"Восстановлено: {restored}")
         
         print("\n" + "=" * 60)
-        print("6. Фильтрация с сортировкой")
-        filtered = Assignment.get_filtered(
-            teacher_id=1, 
-            is_active=True,
-            order_by='semester'
-        )
+        print("7. Фильтрация")
+        filtered = Assignment.get_filtered(teacher_id=1, is_active=True)
         print(f"Результат фильтрации: {filtered}")
         
         print("\n" + "=" * 60)
-        print("7. Попытка обновления is_active через update_assignment")
+        print("8. Попытка обновления is_active через update_assignment")
         try:
             invalid = Assignment.update_assignment(
                 assignment_id=result['id'],
