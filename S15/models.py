@@ -1,7 +1,12 @@
 from peewee import *
 import logging
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Union
 from datetime import datetime
+import sys
+
+# Проверка версии Python для гарантии порядка в словарях
+if sys.version_info < (3, 7):
+    raise RuntimeError("Требуется Python 3.7 или выше для гарантии порядка полей в словарях")
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -44,6 +49,8 @@ class Assignment(Model):
         'hours': int,
         'is_active': bool
     }
+    
+    Примечание: Порядок ключей гарантирован в Python 3.7+
     """
     
     id = AutoField()
@@ -62,8 +69,15 @@ class Assignment(Model):
         )
     
     @staticmethod
+    def validate_not_none(value, field_name: str) -> None:
+        """Проверка, что значение не None"""
+        if value is None:
+            raise ValidationError(f"{field_name} не может быть None")
+    
+    @staticmethod
     def validate_positive(value: int, field_name: str) -> None:
         """Валидация положительных чисел"""
+        Assignment.validate_not_none(value, field_name)
         if not isinstance(value, int):
             raise ValidationError(f"{field_name} должен быть целым числом, получено: {type(value).__name__}")
         if value <= 0:
@@ -72,6 +86,7 @@ class Assignment(Model):
     @staticmethod
     def validate_semester(value: int) -> None:
         """Валидация семестра"""
+        Assignment.validate_not_none(value, "semester")
         if not isinstance(value, int):
             raise ValidationError(f"semester должен быть целым числом, получено: {type(value).__name__}")
         if not (1 <= value <= 8):
@@ -80,16 +95,12 @@ class Assignment(Model):
     @staticmethod
     def validate_id(value: int, field_name: str = "assignment_id") -> None:
         """Валидация ID (должен быть целым числом > 0)"""
+        if value is None:
+            return  # None допустим только для опциональных параметров
         if not isinstance(value, int):
             raise ValidationError(f"{field_name} должен быть целым числом, получено: {type(value).__name__}")
         if value <= 0:
             raise ValidationError(f"{field_name} должен быть > 0, получено: {value}")
-    
-    @staticmethod
-    def validate_boolean(value: bool, field_name: str) -> None:
-        """Валидация булевых значений"""
-        if not isinstance(value, bool):
-            raise ValidationError(f"{field_name} должен быть булевым значением, получено: {type(value).__name__}")
     
     @classmethod
     def validate_pagination_params(cls, limit: Optional[int], offset: Optional[int]) -> None:
@@ -188,7 +199,7 @@ class Assignment(Model):
             AssignmentDuplicateError: при нарушении уникальности
             DatabaseError: при ошибке базы данных
         """
-        # Валидация
+        # Валидация (включая проверку на None)
         cls.validate_positive(teacher_id, "teacher_id")
         cls.validate_positive(discipline_id, "discipline_id")
         cls.validate_positive(group_id, "group_id")
@@ -211,7 +222,7 @@ class Assignment(Model):
             logger.info(f"Создан Assignment с id={assignment.id}")
             return assignment.to_dict()
         except IntegrityError as e:
-            # Универсальная обработка ошибок уникальности (работает с разными СУБД)
+            # Универсальная обработка ошибок уникальности
             error_msg = str(e).lower()
             if "unique" in error_msg or "duplicate" in error_msg:
                 raise AssignmentDuplicateError("Нарушение уникальности комбинации полей")
@@ -231,7 +242,7 @@ class Assignment(Model):
                      Значения None игнорируются (не обновляются)
                      
                      Важно: Поле is_active нельзя обновить через этот метод,
-                     для этого используются отдельные методы soft_delete() и restore()
+                     для этого используются отдельные методы delete() и restore()
         
         Returns:
             Dict[str, Any]: словарь с обновленными данными
@@ -245,14 +256,14 @@ class Assignment(Model):
         # Запрещаем обновление is_active через этот метод
         if 'is_active' in kwargs:
             raise ValidationError("Поле is_active нельзя обновить через update_assignment. "
-                                "Используйте методы soft_delete() или restore()")
+                                "Используйте методы delete() или restore()")
         
         # Валидация ID
         cls.validate_id(assignment_id, "assignment_id")
         
         # Получение существующей записи
         try:
-            assignment = cls.get_by_id(assignment_id)
+            assignment = cls.get(cls.id == assignment_id)
         except cls.DoesNotExist:
             raise AssignmentNotFoundError(f"Assignment с id={assignment_id} не найден")
         
@@ -289,6 +300,8 @@ class Assignment(Model):
             cls.validate_positive(assignment.hours, "hours")
         
         # Проверка уникальности, если изменились любые ключевые поля
+        # Примечание: проверка выполняется только при изменении ключевых полей,
+        # так как только они влияют на уникальность комбинации
         if changed_key_fields:
             cls.check_uniqueness(
                 assignment.teacher_id,
@@ -313,29 +326,31 @@ class Assignment(Model):
             raise DatabaseError(f"Ошибка при обновлении записи: {e}")
     
     @classmethod
-    def soft_delete(cls, assignment_id: int) -> bool:
+    def delete(cls, assignment_id: int) -> bool:
         """
         Мягкое удаление записи (установка is_active = False)
+        
+        Соответствует методу "Удалить Assignment по ID" из doc.md
         
         Args:
             assignment_id: ID записи для удаления (>0)
         
         Returns:
-            bool: True если удаление успешно, False если запись уже удалена или не найдена
+            bool: True если удаление успешно, False в противном случае
         
         Raises:
-            ValidationError: при невалидном assignment_id
-            DatabaseError: при ошибке базы данных
+            DatabaseError: при критической ошибке базы данных (логируется, но не возвращается)
         """
         # Валидация ID
         try:
             cls.validate_id(assignment_id, "assignment_id")
-        except ValidationError:
+        except ValidationError as e:
+            logger.warning(f"Ошибка валидации ID {assignment_id}: {e}")
             return False
         
         # Получение существующей записи
         try:
-            assignment = cls.get_by_id(assignment_id)
+            assignment = cls.get(cls.id == assignment_id)
         except cls.DoesNotExist:
             logger.warning(f"Assignment с id={assignment_id} не найден")
             return False
@@ -351,7 +366,8 @@ class Assignment(Model):
             return True
         except Exception as e:
             logger.error(f"Ошибка при удалении Assignment с id={assignment_id}: {e}")
-            raise DatabaseError(f"Ошибка при удалении записи: {e}")
+            # Не выбрасываем исключение, так как по спецификации метод должен возвращать bool
+            return False
     
     @classmethod
     def restore(cls, assignment_id: int) -> bool:
@@ -365,21 +381,21 @@ class Assignment(Model):
             assignment_id: ID записи для восстановления (>0)
         
         Returns:
-            bool: True если восстановление успешно, False если запись уже активна или не найдена
+            bool: True если восстановление успешно, False в противном случае
         
         Raises:
-            ValidationError: при невалидном assignment_id
-            DatabaseError: при ошибке базы данных
+            DatabaseError: при критической ошибке базы данных (логируется, но не возвращается)
         """
         # Валидация ID
         try:
             cls.validate_id(assignment_id, "assignment_id")
-        except ValidationError:
+        except ValidationError as e:
+            logger.warning(f"Ошибка валидации ID {assignment_id}: {e}")
             return False
         
         # Получение существующей записи
         try:
-            assignment = cls.get_by_id(assignment_id)
+            assignment = cls.get(cls.id == assignment_id)
         except cls.DoesNotExist:
             logger.warning(f"Assignment с id={assignment_id} не найден")
             return False
@@ -388,9 +404,6 @@ class Assignment(Model):
             logger.warning(f"Assignment с id={assignment_id} уже активен")
             return False
         
-        # Проверка уникальности не требуется, так как запись уже существует
-        # и её комбинация полей гарантированно уникальна среди всех записей
-        
         try:
             assignment.is_active = True
             assignment.save(only=['is_active'])
@@ -398,7 +411,8 @@ class Assignment(Model):
             return True
         except Exception as e:
             logger.error(f"Ошибка при восстановлении Assignment с id={assignment_id}: {e}")
-            raise DatabaseError(f"Ошибка при восстановлении записи: {e}")
+            # Не выбрасываем исключение, так как метод должен возвращать bool
+            return False
     
     @classmethod
     def get_by_id(cls, assignment_id: int) -> Dict[str, Any]:
@@ -419,7 +433,7 @@ class Assignment(Model):
         cls.validate_id(assignment_id, "assignment_id")
         
         try:
-            assignment = super().get_by_id(assignment_id)
+            assignment = cls.get(cls.id == assignment_id)
             return assignment.to_dict()
         except cls.DoesNotExist:
             raise AssignmentNotFoundError(f"Assignment с id={assignment_id} не найден")
@@ -436,14 +450,14 @@ class Assignment(Model):
                      limit: Optional[int] = None, 
                      offset: Optional[int] = None) -> List[Dict[str, Any]]:
         """
-        Получение списка Assignment с фильтрацией и пагинацией
+        Получение списка Assignment с фильтрацией и пагинациией
         
         Args:
             teacher_id: ID преподавателя (опционально, с валидацией >0, None = не фильтровать)
             group_id: ID группы (опционально, с валидацией >0, None = не фильтровать)
             discipline_id: ID дисциплины (опционально, с валидацией >0, None = не фильтровать)
             semester: номер семестра (опционально, с валидацией 1-8, None = не фильтровать)
-            is_active: статус активности (опционально, булевый тип, None = не фильтровать)
+            is_active: статус активности (опционально, None = не фильтровать)
             limit: ограничение количества записей (>=0)
             offset: смещение для пагинации (>=0)
         
@@ -456,10 +470,6 @@ class Assignment(Model):
         """
         # Валидация параметров фильтрации (None игнорируется)
         cls.validate_filter_params(teacher_id, group_id, discipline_id, semester)
-        
-        # Валидация is_active типа (если указан)
-        if is_active is not None:
-            cls.validate_boolean(is_active, "is_active")
         
         # Валидация параметров пагинации
         cls.validate_pagination_params(limit, offset)
@@ -500,6 +510,8 @@ class Assignment(Model):
         Returns:
             Dict[str, Any]: словарь с полями модели в порядке:
                 id, teacher_id, group_id, discipline_id, semester, hours, is_active
+                
+        Примечание: Порядок ключей гарантирован в Python 3.7+
         """
         return {
             'id': self.id,
@@ -561,13 +573,13 @@ if __name__ == '__main__':
         print(f"Обновлено: {updated}")
         
         print("\n" + "=" * 60)
-        print("4. Мягкое удаление")
-        deleted = Assignment.soft_delete(assignment_id=result['id'])
+        print("4. Мягкое удаление (метод delete)")
+        deleted = Assignment.delete(assignment_id=result['id'])
         print(f"Удалено: {deleted}")
         
         print("\n" + "=" * 60)
         print("5. Попытка удаления несуществующей записи")
-        deleted_not_found = Assignment.soft_delete(assignment_id=99999)
+        deleted_not_found = Assignment.delete(assignment_id=99999)
         print(f"Результат удаления несуществующей записи: {deleted_not_found} (ожидается False)")
         
         print("\n" + "=" * 60)
@@ -581,7 +593,13 @@ if __name__ == '__main__':
         print(f"Результат фильтрации: {filtered}")
         
         print("\n" + "=" * 60)
-        print("8. Попытка обновления is_active через update_assignment")
+        print("8. Проверка обработки ошибок в delete")
+        # Попытка удаления с невалидным ID
+        invalid_deleted = Assignment.delete(assignment_id=0)
+        print(f"Удаление с ID=0: {invalid_deleted} (ожидается False)")
+        
+        print("\n" + "=" * 60)
+        print("9. Попытка обновления is_active через update_assignment")
         try:
             invalid = Assignment.update_assignment(
                 assignment_id=result['id'],
