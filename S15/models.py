@@ -1,57 +1,111 @@
+"""
+Модели базы данных для сервиса распределения нагрузки (Вариант 15)
+Реализована валидация всех ограничений на уровне модели.
+"""
+
 import os
 from peewee import (
     SqliteDatabase,
     Model,
     IntegerField,
     BooleanField,
-    AutoField
+    AutoField,
+    DoesNotExist
 )
 
-# Путь к файлу базы данных
-DB_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(DB_DIR, "load_assignment.db")
-
-# Подключение к SQLite (без поддержки FOREIGN KEY)
+# Путь к базе данных
+DB_PATH = os.path.join(os.path.dirname(__file__), "load_assignment.db")
 database = SqliteDatabase(DB_PATH, pragmas={"foreign_keys": 0})
 
 
 class BaseModel(Model):
-    """Базовый класс для всех моделей"""
     class Meta:
         database = database
 
 
-class LoadAssignment(BaseModel):
+class Assignment(BaseModel):
     """
     Модель назначения нагрузки.
-    Хранит связь: преподаватель → дисциплина → группа в конкретном семестре.
+    Связывает преподавателя, группу и дисциплину в конкретном семестре.
+    
+    Ограничения (согласно doc.md):
+    - teacher_id: int, > 0
+    - group_id: int, > 0
+    - discipline_id: int, > 0
+    - semester: int, 1-8
+    - hours: int, > 0
+    - is_active: bool, default=True
+    - Уникальность: (teacher_id, discipline_id, group_id, semester)
     """
-    id = AutoField(primary_key=True, verbose_name="ID записи")
-    teacher_id = IntegerField(null=False, verbose_name="ID преподавателя")
-    group_id = IntegerField(null=False, verbose_name="ID группы")
-    discipline_id = IntegerField(null=False, verbose_name="ID дисциплины")
-    semester = IntegerField(null=False, verbose_name="Номер семестра")
-    hours = IntegerField(null=False, verbose_name="Количество часов")
-    active = BooleanField(default=True, verbose_name="Активна ли запись")
+    id = AutoField(primary_key=True, null=False, verbose_name="ID записи")
+    teacher_id = IntegerField(null=False, verbose_name="ID преподавателя (>0)")
+    group_id = IntegerField(null=False, verbose_name="ID группы (>0)")
+    discipline_id = IntegerField(null=False, verbose_name="ID дисциплины (>0)")
+    semester = IntegerField(null=False, verbose_name="Номер семестра (1-8)")
+    hours = IntegerField(null=False, verbose_name="Количество часов (>0)")
+    is_active = BooleanField(null=False, default=True, verbose_name="Активна ли запись")
 
     class Meta:
-        table_name = "load_assignments"
-        # Уникальность: один преподаватель не может вести ту же дисциплину
-        # в той же группе в том же семестре дважды
+        table_name = "assignments"
+        # Составной уникальный индекс для соблюдения уникальности комбинации
         indexes = (
             (("teacher_id", "discipline_id", "group_id", "semester"), True),
         )
 
+    @staticmethod
+    def _validate_positive(value: int, field_name: str) -> None:
+        """Валидация: значение должно быть > 0"""
+        if value <= 0:
+            raise ValueError(f"{field_name} должен быть больше 0, получено {value}")
+
+    @staticmethod
+    def _validate_semester(value: int) -> None:
+        """Валидация: семестр должен быть в диапазоне 1-8"""
+        if not (1 <= value <= 8):
+            raise ValueError(f"semester должен быть в диапазоне 1-8, получено {value}")
+
+    def validate(self) -> None:
+        """
+        Выполняет валидацию всех полей согласно требованиям doc.md.
+        Вызывается перед сохранением (create/update).
+        """
+        # teacher_id > 0
+        self._validate_positive(self.teacher_id, "teacher_id")
+        
+        # group_id > 0
+        self._validate_positive(self.group_id, "group_id")
+        
+        # discipline_id > 0
+        self._validate_positive(self.discipline_id, "discipline_id")
+        
+        # semester 1-8
+        self._validate_semester(self.semester)
+        
+        # hours > 0
+        self._validate_positive(self.hours, "hours")
+
+    def save(self, *args, **kwargs) -> int:
+        """Переопределённый save с валидацией перед сохранением"""
+        self.validate()
+        return super().save(*args, **kwargs)
+
+    @classmethod
+    def create(cls, **kwargs) -> "Assignment":
+        """Переопределённый create с валидацией"""
+        instance = cls(**kwargs)
+        instance.validate()
+        return super().create(**kwargs)
+
 
 def init_db() -> None:
-    """Инициализация базы данных: подключение и создание таблиц"""
+    """Функция инициализации базы данных"""
     database.connect(reuse_if_open=True)
-    database.create_tables([LoadAssignment], safe=True)
+    database.create_tables([Assignment], safe=True)
     database.close()
 
 
-# Точка входа для автономной инициализации
+# Точка входа, которая вызывает функцию инициализации
 if __name__ == "__main__":
     init_db()
-    print("База данных успешно инициализирована")
-    print(f"Файл БД: {DB_PATH}")
+    print("Database initialized successfully")
+    print(f"Database path: {DB_PATH}")
