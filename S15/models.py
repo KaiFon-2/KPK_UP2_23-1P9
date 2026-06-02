@@ -1,51 +1,59 @@
-import os
-from peewee import (
-    SqliteDatabase,
-    Model,
-    IntegerField,
-    BooleanField,
-    AutoField
-)
+from peewee import *
+from datetime import datetime
 
-# Путь к базе данных
-DB_PATH = os.path.join(os.path.dirname(__file__), "load_assignment.db")
-database = SqliteDatabase(DB_PATH, pragmas={"foreign_keys": 0})
-
+db = SqliteDatabase('university.db')
 
 class BaseModel(Model):
+    created_at = DateTimeField(default=datetime.now)
+    updated_at = DateTimeField(default=datetime.now)
+    is_deleted = BooleanField(default=False)
+    deleted_at = DateTimeField(null=True)
+    
+    def soft_delete(self):
+        self.is_deleted = True
+        self.deleted_at = datetime.now()
+        self.save()
+    
+    def save(self, *args, **kwargs):
+        if self.id:
+            self.updated_at = datetime.now()
+        else:
+            self.created_at = datetime.now()
+        return super().save(*args, **kwargs)
+    
     class Meta:
-        database = database
+        database = db
 
-
-class Assignment(BaseModel):
-    """
-    Модель назначения нагрузки.
-    Связывает преподавателя, группу и дисциплину в конкретном семестре.
-    """
-    id = AutoField(primary_key=True, null=False)
-    teacher_id = IntegerField(null=False)      # ID из Teacher Service
-    group_id = IntegerField(null=False)        # ID из Group Service
-    discipline_id = IntegerField(null=False)   # ID из Discipline Service
-    semester = IntegerField(null=False)        # Номер семестра 1-8
-    hours = IntegerField(null=False)           # Количество часов
-    is_active = BooleanField(null=False, default=True)  # Логическое удаление
-
+class Schedule(BaseModel):
+    teacher_id = IntegerField()
+    group_id = IntegerField()
+    discipline_id = IntegerField()
+    semester = IntegerField()
+    hours = IntegerField()
+    schedule_date = DateField()
+    
+    def validate(self):
+        if self.teacher_id <= 0:
+            raise ValueError(f"teacher_id должен быть > 0, получено: {self.teacher_id}")
+        if self.group_id <= 0:
+            raise ValueError(f"group_id должен быть > 0, получено: {self.group_id}")
+        if self.discipline_id <= 0:
+            raise ValueError(f"discipline_id должен быть > 0, получено: {self.discipline_id}")
+        if not (1 <= self.semester <= 8):
+            raise ValueError(f"semester должен быть от 1 до 8, получено: {self.semester}")
+        if self.hours <= 0:
+            raise ValueError(f"hours должен быть > 0, получено: {self.hours}")
+    
+    def save(self, *args, **kwargs):
+        self.validate()
+        return super().save(*args, **kwargs)
+    
     class Meta:
-        table_name = "assignments"
-        # Составной уникальный индекс для соблюдения уникальности комбинации
-        indexes = (
-            (("teacher_id", "discipline_id", "group_id", "semester"), True),
-        )
+        table_name = 'schedule'
 
+def init_db():
+    db.connect()
+    db.create_tables([Schedule])
 
-def init_db() -> None:
-    """Функция инициализации базы данных"""
-    database.connect(reuse_if_open=True)
-    database.create_tables([Assignment], safe=True)
-    database.close()
-
-
-# Точка входа, которая вызывает функцию инициализации
-if __name__ == "__main__":
+if __name__ == '__main__':
     init_db()
-    print("Database initialized successfully")
