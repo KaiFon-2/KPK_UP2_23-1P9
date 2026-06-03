@@ -15,7 +15,7 @@ from peewee import (
     AutoField
 )
 
-# Путь к базе данных
+# Путь к базе данных (исправлена опечатка: os.path.join)
 DB_PATH = os.path.join(os.path.dirname(__file__), "load_assignment.db")
 database = SqliteDatabase(DB_PATH, pragmas={"foreign_keys": 0})
 
@@ -34,11 +34,11 @@ class LoadAssignment(BaseModel):
     в других сервисах (Teacher Service, Group Service, Discipline Service).
     
     Ограничения (согласно doc.md):
-    - teacher_id: int, > 0
-    - group_id: int, > 0
-    - discipline_id: int, > 0
-    - semester: int, 1-8
-    - hours: int, > 0
+    - teacher_id: int, > 0 (должно проверяться на уровне API)
+    - group_id: int, > 0 (должно проверяться на уровне API)
+    - discipline_id: int, > 0 (должно проверяться на уровне API)
+    - semester: int, 1-8 (должно проверяться на уровне API)
+    - hours: int, > 0 (должно проверяться на уровне API)
     - is_active: bool, default=True
     - Уникальность: (teacher_id, discipline_id, group_id, semester)
     """
@@ -52,6 +52,7 @@ class LoadAssignment(BaseModel):
 
     class Meta:
         table_name = "load_assignment"
+        # Составной уникальный индекс для соблюдения уникальности комбинации
         indexes = (
             (("teacher_id", "discipline_id", "group_id", "semester"), True),
         )
