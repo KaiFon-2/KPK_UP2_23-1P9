@@ -15,7 +15,7 @@ from peewee import (
     AutoField
 )
 
-# Путь к базе данных (исправлена опечатка: os.path.join)
+# Путь к базе данных
 DB_PATH = os.path.join(os.path.dirname(__file__), "load_assignment.db")
 database = SqliteDatabase(DB_PATH, pragmas={"foreign_keys": 0})
 
@@ -32,15 +32,8 @@ class LoadAssignment(BaseModel):
     
     Поля teacher_id, group_id, discipline_id являются ссылками на записи
     в других сервисах (Teacher Service, Group Service, Discipline Service).
-    
-    Ограничения (согласно doc.md):
-    - teacher_id: int, > 0 (должно проверяться на уровне API)
-    - group_id: int, > 0 (должно проверяться на уровне API)
-    - discipline_id: int, > 0 (должно проверяться на уровне API)
-    - semester: int, 1-8 (должно проверяться на уровне API)
-    - hours: int, > 0 (должно проверяться на уровне API)
-    - is_active: bool, default=True
-    - Уникальность: (teacher_id, discipline_id, group_id, semester)
+    Валидация ограничений (teacher_id > 0, semester 1-8, hours > 0 и т.д.)
+    должна выполняться на уровне API, а не в модели.
     """
     id = AutoField(primary_key=True, null=False)
     teacher_id = IntegerField(null=False)
@@ -52,7 +45,7 @@ class LoadAssignment(BaseModel):
 
     class Meta:
         table_name = "load_assignment"
-        # Составной уникальный индекс для соблюдения уникальности комбинации
+        # Составной уникальный индекс для связи "многие ко многим"
         indexes = (
             (("teacher_id", "discipline_id", "group_id", "semester"), True),
         )
