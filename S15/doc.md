@@ -15,9 +15,9 @@
 erDiagram
     LOAD_ASSIGNMENT {
         int id PK
-        int teacher_id FK
-        int group_id FK
-        int discipline_id FK
+        int teacher_id
+        int group_id
+        int discipline_id
         int semester
         int hours
         bool is_active
