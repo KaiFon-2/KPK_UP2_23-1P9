@@ -51,8 +51,7 @@ class LoadAssignment(BaseModel):
     is_active = BooleanField(null=False, default=True)
 
     class Meta:
-        table_name = "load_assignments"
-        # Составной уникальный индекс для соблюдения уникальности комбинации
+        table_name = "load_assignment"
         indexes = (
             (("teacher_id", "discipline_id", "group_id", "semester"), True),
         )
